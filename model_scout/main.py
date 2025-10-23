@@ -2,7 +2,9 @@
 model_scout.main
 
 Entry point and orchestrator for Model Scout.
-Now includes progressive CSV saving after each model instance run.
+Now includes:
+ - Progressive CSV saving after each model instance
+ - Automatic saving of best-performing models to /models folder
 """
 
 import argparse
@@ -10,12 +12,15 @@ import json
 import os
 from pathlib import Path
 import pandas as pd
+import joblib
 from joblib import Parallel, delayed
 
 from . import (
     config,
     data_utils,
     run_single,
+    models,
+    encoding,
     aggregator,
     plotting,
     report,
@@ -25,7 +30,7 @@ from . import (
 def run_scout(
     sequences,
     labels,
-    models,
+    models_list,
     encodings,
     sample_sizes,
     task="regression",
@@ -43,18 +48,18 @@ def run_scout(
 
     # Output paths
     out_json = Path(outpath)
+    out_dir = out_json.parent
     out_csv = out_json.with_suffix(".csv")
     out_csv.unlink(missing_ok=True)
 
     print(f"📁 Results will be progressively written to: {out_csv.resolve()}")
 
-    total_jobs = len(models) * len(encodings) * len(sample_sizes)
+    total_jobs = len(models_list) * len(encodings) * len(sample_sizes)
     results = []
 
     def _save_progress(result):
         """Append a single result dict to CSV progressively."""
         df_row = pd.DataFrame([result])
-        # header only if file doesn't exist or empty
         write_header = not out_csv.exists() or out_csv.stat().st_size == 0
         df_row.to_csv(out_csv, mode="a", header=write_header, index=False)
 
@@ -62,12 +67,11 @@ def run_scout(
 
     combos = [
         (m, e, n)
-        for m in models
+        for m in models_list
         for e in encodings
         for n in sample_sizes
     ]
 
-    # Run all combinations in parallel
     parallel_results = Parallel(n_jobs=n_jobs)(
         delayed(run_single.run_single)(
             df["sequence"].tolist(),
@@ -82,7 +86,6 @@ def run_scout(
         for (m, e, n) in combos
     )
 
-    # Save progressively as they finish
     for i, result in enumerate(parallel_results, 1):
         results.append(result)
         _save_progress(result)
@@ -90,18 +93,49 @@ def run_scout(
             f"[{i}/{total_jobs}] ✅ {result.get('model')} | {result.get('encoding')} | n={result.get('n_samples')} saved."
         )
 
-    # Save full results
+    # Aggregate and save final results
     print("💾 Aggregating and saving final results...")
     df_results = aggregator.save_results(results, out_json)
 
-    # Ranking
     ranked = aggregator.rank_results(df_results, alpha)
     print("\n🏆 Top-ranked combinations:")
     print(ranked.head(10).to_string(index=False))
 
+    # --- 🔽 Save best-performing models per type ---
+    print("\n🧠 Training and saving best-performing models...")
+    models_dir = out_dir / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    for model_name in df_results["model"].unique():
+        df_model = df_results[df_results["model"] == model_name]
+        if df_model.empty:
+            continue
+        # pick best based on Spearman rho
+        best_row = df_model.sort_values("rho", ascending=False).iloc[0]
+        best_encoding = best_row["encoding"]
+        best_n = int(best_row["n_samples"])
+
+        print(f"  → {model_name}: best with {best_encoding} (n={best_n})")
+
+        # Retrain on all available data
+        seqs = df["sequence"].tolist()[:best_n]
+        labels_subset = df["label"].tolist()[:best_n]
+        X = encoding.encode_sequences(seqs, best_encoding)
+        y = labels_subset
+
+        model = models.build_model(task, model_name, seed)
+        model.fit(X, y)
+
+        # Save model
+        model_path = models_dir / f"{model_name}_{best_encoding}_{best_n}.joblib"
+        joblib.dump(model, model_path)
+        print(f"     💾 Saved to {model_path.name}")
+
+    # --- 🔼 Done saving models ---
+
     # Plots
     print("\n📊 Generating plots...")
-    plot_paths = plotting.make_plots(df_results, out_json.parent)
+    plot_paths = plotting.make_plots(df_results, out_dir)
 
     # Report
     print("\n🧾 Creating HTML report...")
@@ -113,11 +147,12 @@ def run_scout(
         "n_jobs": n_jobs,
         "total_runs": total_jobs,
     }
-    report.make_html_report(out_json.parent, plot_paths, meta, ranked, df_results)
+    report.make_html_report(out_dir, plot_paths, meta, ranked, df_results)
 
     summary = {
         "out_json": str(out_json.resolve()),
         "out_csv": str(out_csv.resolve()),
+        "models_dir": str(models_dir.resolve()),
         "plots": plot_paths,
         "meta": meta,
         "top": ranked.head(20).to_dict(orient="records"),
@@ -129,7 +164,8 @@ def run_scout(
     print("\n✅ All done!")
     print(f"Summary JSON: {out_json.resolve()}")
     print(f"Progressive CSV: {out_csv.resolve()}")
-    print(f"HTML Report: {out_json.parent / 'reports' / 'summary.html'}")
+    print(f"Saved models: {models_dir.resolve()}")
+    print(f"HTML Report: {out_dir / 'reports' / 'summary.html'}")
 
     return summary
 
@@ -172,7 +208,7 @@ def cli_entry():
     run_scout(
         sequences=args.sequences,
         labels=args.labels,
-        models=args.models,
+        models_list=args.models,
         encodings=args.encodings,
         sample_sizes=args.samples,
         task=args.task,
