@@ -1,75 +1,72 @@
-import os
-from datetime import datetime
+import pandas as pd
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
 
+def generate_report(df_results, ranked, out_dir, task):
+    """Generate simple HTML and plots summarizing train/test performance."""
 
-def make_html_report(outdir, plots, meta, ranked_df, df_results):
-    """
-    Generate an HTML report summarizing Model Scout results.
-    Now dynamically labels ranking metric (accuracy or Spearman ρ)
-    and includes generation timestamp.
-    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    report_dir = os.path.join(outdir, "reports")
-    os.makedirs(report_dir, exist_ok=True)
-    report_path = os.path.join(report_dir, "summary.html")
+    # --- Summary Table ---
+    summary_html = out_dir / "summary.html"
+    df_display = ranked.copy()
 
-    def rel(p):  # relative path helper for embedded links
-        return os.path.relpath(p, report_dir).replace("\\", "/")
-
-    # Detect ranking metric type from ranked_df
-    if "metric_type" in ranked_df.columns and not ranked_df.empty:
-        metric_label = (
-            "accuracy"
-            if ranked_df["metric_type"].iloc[0] == "accuracy"
-            else "Spearman ρ"
+    # Compute overfitting indicator
+    if "rho_train" in df_display.columns and "rho_test" in df_display.columns:
+        df_display["Δρ"] = df_display["rho_train"] - df_display["rho_test"]
+        df_display["overfit_flag"] = df_display["Δρ"].apply(
+            lambda x: "⚠️" if x > 0.1 else ""
         )
-    else:
-        # Fallback for backward compatibility
-        metric_label = "Spearman ρ"
 
-    # Top table of ranked results
-    top_html = ranked_df.head(20).to_html(index=False, float_format=lambda x: f"{x:.4f}")
+    df_display_html = df_display.to_html(index=False, float_format="%.4f")
 
-    # Format metadata
-    models = ", ".join(meta.get("models", [])) if isinstance(meta.get("models"), list) else meta.get("models", "")
-    encodings = ", ".join(meta.get("encodings", [])) if isinstance(meta.get("encodings"), list) else meta.get("encodings", "")
-    sample_grid = ", ".join(map(str, meta.get("sample_grid", []))) if isinstance(meta.get("sample_grid"), (list, tuple)) else meta.get("sample_grid", "")
+    html = f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Model Scout Report</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 30px; }}
+            h1 {{ color: #333; }}
+            table {{ border-collapse: collapse; width: 100%; }}
+            th, td {{ border: 1px solid #ccc; padding: 8px; text-align: center; }}
+            th {{ background-color: #eee; }}
+        </style>
+    </head>
+    <body>
+        <h1>Model Scout Results — {task.title()}</h1>
+        <p>Showing Spearman ρ and p-values for training and test sets.</p>
+        {df_display_html}
+    </body>
+    </html>
+    """
 
-    html = f"""<!doctype html>
-<html><head><meta charset="utf-8" />
-<title>Model Scout Report</title>
-<style>
-body{{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:24px;}}
-h1{{margin-bottom:8px;}} h2{{margin-top:28px;}}
-table{{border-collapse:collapse;width:100%;}}
-th,td{{border:1px solid #ddd;padding:6px 8px;text-align:left;font-size:0.95rem;}}
-th{{background:#f7f7f7;}}
-.plots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-top:12px;}}
-.card{{border:1px solid #eee;border-radius:10px;padding:10px;background:#fff;}}
-.thumb{{width:100%;height:auto;border-radius:6px;border:1px solid #eee;}}
-.small{{color:#666;font-size:0.9rem;}}
-</style></head><body>
-<h1>Model Scout Report</h1>
-<p><b>Task:</b> {meta.get('task','?')} | <b>α:</b> {meta.get('alpha','?')} | <b>Jobs:</b> {meta.get('n_jobs','?')}</p>
-<p><b>Models:</b> {models}<br>
-<b>Encodings:</b> {encodings}<br>
-<b>Sample grid:</b> {sample_grid}<br>
-<b>Total runs:</b> {len(df_results)}</p>
-
-<h2>Top Configurations (ranked by {metric_label})</h2>
-{top_html}
-
-<h2>Plots</h2>
-<div class="plots">
-  <div class="card"><b>Heatmap</b><a href="{rel(plots['heatmap'])}" target="_blank"><img class="thumb" src="{rel(plots['heatmap'])}"/></a></div>
-  <div class="card"><b>ρ vs Samples</b><a href="{rel(plots['rho_vs_samples'])}" target="_blank"><img class="thumb" src="{rel(plots['rho_vs_samples'])}"/></a></div>
-  <div class="card"><b>Runtime per Model</b><a href="{rel(plots['runtime'])}" target="_blank"><img class="thumb" src="{rel(plots['runtime'])}"/></a></div>
-</div>
-
-<p class="small">Report generated on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} in {outdir}</p>
-</body></html>"""
-
-    with open(report_path, "w", encoding="utf-8") as f:
+    with open(summary_html, "w", encoding="utf-8") as f:
         f.write(html)
+    print(f"📊 Generated summary → {summary_html.resolve()}")
 
-    return report_path
+    # --- Correlation Comparison Plot ---
+    if {"rho_train", "rho_test"}.issubset(df_results.columns):
+        plt.figure(figsize=(7, 6))
+        sns.scatterplot(
+            data=df_results,
+            x="rho_train",
+            y="rho_test",
+            hue="encoding",
+            style="model",
+            s=100
+        )
+        plt.title("Train vs Test Spearman Correlation")
+        plt.xlabel("ρ_train")
+        plt.ylabel("ρ_test")
+        plt.grid(True)
+        plt.tight_layout()
+
+        plot_path = out_dir / "train_vs_test_rho.png"
+        plt.savefig(plot_path, dpi=300)
+        plt.close()
+        print(f"📈 Saved train/test plot → {plot_path.resolve()}")
+
+    return [summary_html], {"n_results": len(df_results), "top_rho": df_display["rho_test"].max()}

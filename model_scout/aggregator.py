@@ -2,45 +2,53 @@ import json
 import pandas as pd
 from pathlib import Path
 
-def save_results(results, outpath):
-    outdir = Path(outpath).parent
-    outdir.mkdir(parents=True, exist_ok=True)
-    with open(outpath, "w") as f:
-        json.dump(results, f, indent=2)
+def save_results(results, out_json):
+    """Save all run results to both JSON and CSV formats."""
     df = pd.DataFrame(results)
-    df.to_csv(outdir / "model_scout_results.csv", index=False)
+
+    # Ensure all expected columns exist even if missing from some runs
+    for col in [
+        "model", "encoding", "n_samples",
+        "rho_train", "p_train", "rho_test", "p_test",
+        "seconds", "status"
+    ]:
+        if col not in df.columns:
+            df[col] = None
+
+    df.to_json(out_json, orient="records", indent=2)
+    csv_path = Path(out_json).with_suffix(".csv")
+    df.to_csv(csv_path, index=False)
+
+    print(f"💾 Saved results JSON → {out_json.resolve()}")
+    print(f"💾 Saved results CSV  → {csv_path.resolve()}")
+
     return df
 
-def rank_results(df: pd.DataFrame, alpha: float = 0.01) -> pd.DataFrame:
-    """
-    Rank results by best-performing metric.
-    - For regression tasks: Spearman rho (higher is better)
-    - For classification tasks: accuracy (higher is better, falls back to rho)
-    """
-    # Determine which metric to rank by
-    metric_to_rank = "accuracy" if "accuracy" in df.columns and df["accuracy"].notna().any() else "rho"
 
-    # Filter to significant results (based on p if available)
-    if "p" in df.columns:
-        df_sig = df[df["p"] <= alpha]
-        if df_sig.empty:
-            df_sig = df
+def rank_results(df, alpha=0.05):
+    """
+    Rank results by rho_test descending (primary metric),
+    then by runtime ascending, then by rho_train for tie-breaking.
+    """
+    # Only keep successful runs
+    df_ok = df[df["status"].str.lower().eq("ok")]
+
+    if "rho_test" in df_ok.columns:
+        df_ranked = df_ok.sort_values(
+            by=["rho_test", "rho_train", "seconds"],
+            ascending=[False, False, True],
+            na_position="last"
+        ).reset_index(drop=True)
     else:
-        df_sig = df
+        # Fallback to old metric naming if necessary
+        df_ranked = df_ok.sort_values(
+            by=["rho", "seconds"],
+            ascending=[False, True],
+            na_position="last"
+        ).reset_index(drop=True)
 
-    # Compute group-wise best metrics
-    agg_dict = {metric_to_rank: "max", "n_samples": "min"}
-    if "p" in df_sig.columns:
-        agg_dict["p"] = "min"
+    # Optional filtering by significance
+    if "p_test" in df_ranked.columns:
+        df_ranked = df_ranked[df_ranked["p_test"] < alpha].reset_index(drop=True)
 
-    grouped = (
-        df_sig.groupby(["model", "encoding"], as_index=False)
-        .agg(agg_dict)
-        .sort_values(metric_to_rank, ascending=False)
-        .reset_index(drop=True)
-    )
-
-    grouped.rename(columns={metric_to_rank: "best_metric"}, inplace=True)
-    grouped["metric_type"] = metric_to_rank
-
-    return grouped
+    return df_ranked
