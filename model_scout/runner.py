@@ -137,21 +137,43 @@ def run_scout(
     test_size=0.2,
     stratify=False,
     n_jobs=config.N_JOBS,
-    outpath="model_scout_results.json",
-    model_config_path=None,   # ✅ added
+    outpath="model_scout_results/",
+    model_config_path=None,
 ):
-
     """Run the full Model Scout pipeline."""
+
     print("🔍 Loading data...")
     df = data_utils.load_data(sequences, labels)
     print(f"Loaded {len(df)} sequences with labels.")
 
-    out_json = Path(outpath)
-    out_dir = out_json.parent
-    out_csv = out_json.with_suffix(".csv")
+    # --- Handle --out as directory always ---
+    out_dir = Path(outpath)
+    if not out_dir.exists():
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    out_json = out_dir / "results.json"
+    out_csv = out_dir / "results.csv"
+
+    print(f"📁 Output directory: {out_dir.resolve()}")
+    print(f"📊 Progressive results → {out_csv.resolve()}")
+
+    # Clean old results if re-running
     out_csv.unlink(missing_ok=True)
 
-    results = _run_parallel_jobs(df, models_list, encodings, sample_sizes, task, seed, test_size, stratify, n_jobs, out_csv, model_config_path=model_config_path)
+    # --- main experiment loop ---
+    results = _run_parallel_jobs(
+        df,
+        models_list,
+        encodings,
+        sample_sizes,
+        task,
+        seed,
+        test_size,
+        stratify,
+        n_jobs,
+        out_csv,
+        model_config_path=model_config_path,
+    )
 
     print("💾 Aggregating final results...")
     df_results = aggregator.save_results(results, out_json)
@@ -160,8 +182,24 @@ def run_scout(
     print("\n🏆 Top-ranked combinations:")
     print(ranked.head(10).to_string(index=False))
 
-    models_dir = _train_best_models(df_results, df, task, seed, out_dir, model_config_path=model_config_path)
-    plot_paths, meta = _generate_report(out_dir, df_results, ranked, task, alpha, seed, test_size, stratify, n_jobs, models_list, encodings, sample_sizes)
+    # Save best models
+    models_dir = _train_best_models(df_results, df, task, seed, out_dir, model_config_path)
+
+    # Generate plots and report
+    plot_paths, meta = _generate_report(
+        out_dir,
+        df_results,
+        ranked,
+        task,
+        alpha,
+        seed,
+        test_size,
+        stratify,
+        n_jobs,
+        models_list,
+        encodings,
+        sample_sizes,
+    )
 
     summary = {
         "out_json": str(out_json.resolve()),
@@ -173,5 +211,5 @@ def run_scout(
     }
 
     progress.write_summary(summary, out_json)
-    print("\n✅ All done! Report generated.")
+    print(f"\n✅ All done! Report and outputs saved in {out_dir.resolve()}")
     return summary
