@@ -32,7 +32,7 @@ def run_scout(
     seed=42,
     test_size=0.2,
     stratify="none",
-    outpath="runs/model_scout/model_scout_results.json",
+    outpath="model_scout_outs/model_scout_results.json",
     n_jobs=N_JOBS,
 ):
     print(f"[INFO] Starting model scout using {n_jobs} parallel jobs")
@@ -119,7 +119,7 @@ def cli_entry():
     ap.add_argument("--alpha", type=float, default=ALPHA)
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--stratify", type=str, default="none", choices=["none", "auto"])
-    ap.add_argument("--out", type=str, default="runs/model_scout/model_scout_results.json")
+    ap.add_argument("--out", type=str, default="model_scout_outs/model_scout_results.json")
     ap.add_argument("--jobs", type=int, default=N_JOBS)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
