@@ -1,143 +1,188 @@
-# --- Auto-detect your repo root so we can import ml_models.* ---
-# import sys
-# from pathlib import Path
-# if "ml_models" not in sys.modules:
-#     here = Path(__file__).resolve()
-#     for parent in here.parents:
-#         if (parent / "ml_models").exists():
-#             sys.path.insert(0, str(parent))
-#             break
-# ---------------------------------------------------------------
+"""
+model_scout.main
 
-import os, json
-import pandas as pd
+Entry point and orchestrator for Model Scout.
+Now includes progressive CSV saving after each model instance run.
+"""
+
+import argparse
+import json
+import os
 from pathlib import Path
+import pandas as pd
 from joblib import Parallel, delayed
-from sklearn.preprocessing import LabelEncoder
 
-from .config import DEFAULT_MODELS, DEFAULT_ENCODINGS, DEFAULT_SAMPLE_GRID, ALPHA, N_JOBS
-from .run_single import run_single
-from .aggregator import save_results, rank_results
-from .plotting import make_plots
-from .report import make_html_report
-from .data_utils import load_data  # from your main project
+from . import (
+    config,
+    data_utils,
+    run_single,
+    aggregator,
+    plotting,
+    report,
+)
+
 
 def run_scout(
-    seq_file,
-    labels_file=None,
-    models=DEFAULT_MODELS,
-    encodings=DEFAULT_ENCODINGS,
-    sample_grid=DEFAULT_SAMPLE_GRID,
-    alpha=ALPHA,
+    sequences,
+    labels,
+    models,
+    encodings,
+    sample_sizes,
+    task="regression",
+    alpha=config.ALPHA,
     seed=42,
     test_size=0.2,
-    stratify="none",
-    outpath="model_scout_outs/model_scout_results.json",
-    n_jobs=N_JOBS,
+    n_jobs=config.N_JOBS,
+    outpath="model_scout_results.json",
 ):
-    print(f"[INFO] Starting model scout using {n_jobs} parallel jobs")
+    """Main driver for Model Scout pipeline."""
 
-    df = load_data(seq_file, labels_file)
-    
-    if not df["label"].dtype.kind in "if":
-        df["label"] = LabelEncoder().fit_transform(df["label"])
-        task = "classification"
-    else:
-        task = "regression"
-    # --- Sanity check: preview first 10 sequences and labels ---
-    try:
-        n_preview = min(10, len(df))
-        seq_preview = [str(s)[:10] for s in df["sequence"].head(n_preview)]
-        label_preview = df["label"].head(n_preview).tolist()
-        print("[INFO] Data preview (first 10):")
-        for i, (seq, label) in enumerate(zip(seq_preview, label_preview)):
-            print(f"  {i+1:2d}. {seq:<12} → {label}")
-    except Exception as e:
-        print(f"[WARN] Could not preview sequences/labels: {e}")
+    print("🔍 Loading data...")
+    df = data_utils.load_data(sequences, labels)
+    print(f"Loaded {len(df)} sequences with labels.")
+
+    # Output paths
+    out_json = Path(outpath)
+    out_csv = out_json.with_suffix(".csv")
+    out_csv.unlink(missing_ok=True)
+
+    print(f"📁 Results will be progressively written to: {out_csv.resolve()}")
+
+    total_jobs = len(models) * len(encodings) * len(sample_sizes)
+    results = []
+
+    def _save_progress(result):
+        """Append a single result dict to CSV progressively."""
+        df_row = pd.DataFrame([result])
+        # header only if file doesn't exist or empty
+        write_header = not out_csv.exists() or out_csv.stat().st_size == 0
+        df_row.to_csv(out_csv, mode="a", header=write_header, index=False)
+
+    print(f"🚀 Running {total_jobs} model instances ({n_jobs} parallel jobs)...")
 
     combos = [
         (m, e, n)
-        for m in models for e in encodings for n in sample_grid
-        if len(df) >= n
+        for m in models
+        for e in encodings
+        for n in sample_sizes
     ]
-    print(f"[INFO] Total runs: {len(combos)}")
 
-    results = Parallel(n_jobs=n_jobs, backend="loky", verbose=5)(
-        delayed(run_single)(m, e, n, df, task, seed, test_size, stratify)
+    # Run all combinations in parallel
+    parallel_results = Parallel(n_jobs=n_jobs)(
+        delayed(run_single.run_single)(
+            df["sequence"].tolist(),
+            df["label"].tolist(),
+            model_name=m,
+            encoding=e,
+            n_samples=n,
+            task=task,
+            test_size=test_size,
+            seed=seed,
+        )
         for (m, e, n) in combos
     )
 
-    outdir = Path(outpath).parent
-    df_results = save_results(results, outpath)
-    grouped = rank_results(df_results, alpha)
-    print("\nTop configurations (Spearman ρ):")
-    print(grouped.head(10).to_string(index=False))
+    # Save progressively as they finish
+    for i, result in enumerate(parallel_results, 1):
+        results.append(result)
+        _save_progress(result)
+        print(
+            f"[{i}/{total_jobs}] ✅ {result.get('model')} | {result.get('encoding')} | n={result.get('n_samples')} saved."
+        )
 
-    plots = make_plots(df_results, os.path.join(outdir, "plots"))
-    report_path = make_html_report(
-        outdir=str(outdir),
-        plots=plots,
-        meta={
-            "alpha": alpha,
-            "models": models,
-            "encodings": encodings,
-            "sample_grid": sample_grid,
-            "n_jobs": n_jobs,
-            "task": task,
-        },
-        ranked_df=grouped,
-        df_results=df_results,
-    )
+    # Save full results
+    print("💾 Aggregating and saving final results...")
+    df_results = aggregator.save_results(results, out_json)
 
-    final = {
-        "alpha": alpha,
-        "models_tested": models,
-        "encodings_tested": encodings,
-        "sample_grid": sample_grid,
-        "n_jobs": n_jobs,
+    # Ranking
+    ranked = aggregator.rank_results(df_results, alpha)
+    print("\n🏆 Top-ranked combinations:")
+    print(ranked.head(10).to_string(index=False))
+
+    # Plots
+    print("\n📊 Generating plots...")
+    plot_paths = plotting.make_plots(df_results, out_json.parent)
+
+    # Report
+    print("\n🧾 Creating HTML report...")
+    meta = {
         "task": task,
-        "ranked_results": grouped.to_dict(orient="records"),
-        "all_results": results,
-        "plot_dir": os.path.join(outdir, "plots"),
-        "html_report": report_path,
+        "alpha": alpha,
+        "seed": seed,
+        "test_size": test_size,
+        "n_jobs": n_jobs,
+        "total_runs": total_jobs,
     }
-    with open(outpath, "w") as f:
-        json.dump(final, f, indent=2)
+    report.make_html_report(out_json.parent, plot_paths, meta, ranked, df_results)
 
-    print(f"[INFO] Report: {report_path}")
-    print(f"[INFO] Results: {outpath}")
-    return final
+    summary = {
+        "out_json": str(out_json.resolve()),
+        "out_csv": str(out_csv.resolve()),
+        "plots": plot_paths,
+        "meta": meta,
+        "top": ranked.head(20).to_dict(orient="records"),
+    }
+
+    with open(out_json, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    print("\n✅ All done!")
+    print(f"Summary JSON: {out_json.resolve()}")
+    print(f"Progressive CSV: {out_csv.resolve()}")
+    print(f"HTML Report: {out_json.parent / 'reports' / 'summary.html'}")
+
+    return summary
+
 
 def cli_entry():
-    import argparse
-    ap = argparse.ArgumentParser(description="Parallel model scout (modular).")
-    ap.add_argument("sequences", type=str)
-    ap.add_argument("--labels", type=str, default=None)
-    ap.add_argument("--models", type=str, default=",".join(DEFAULT_MODELS))
-    ap.add_argument("--encodings", type=str, default=",".join(DEFAULT_ENCODINGS))
-    ap.add_argument("--samples", type=str, default=",".join(map(str, DEFAULT_SAMPLE_GRID)))
-    ap.add_argument("--alpha", type=float, default=ALPHA)
-    ap.add_argument("--test-size", type=float, default=0.2)
-    ap.add_argument("--stratify", type=str, default="none", choices=["none", "auto"])
-    ap.add_argument("--out", type=str, default="model_scout_outs/model_scout_results.json")
-    ap.add_argument("--jobs", type=int, default=N_JOBS)
-    ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
+    """Command-line interface for Model Scout."""
+    parser = argparse.ArgumentParser(
+        description="Benchmark multiple models and encodings on sequence-property data."
+    )
+    parser.add_argument("sequences", help="Path to sequences .csv or .npy file")
+    parser.add_argument("--labels", required=True, help="Path to labels .csv or .npy file")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=config.DEFAULT_MODELS,
+        help=f"Models to test (default: {config.DEFAULT_MODELS})",
+    )
+    parser.add_argument(
+        "--encodings",
+        nargs="+",
+        default=config.DEFAULT_ENCODINGS,
+        help=f"Encodings to test (default: {config.DEFAULT_ENCODINGS})",
+    )
+    parser.add_argument(
+        "--samples",
+        nargs="+",
+        type=int,
+        default=config.DEFAULT_SAMPLE_GRID,
+        help=f"Sample sizes (default: {config.DEFAULT_SAMPLE_GRID})",
+    )
+    parser.add_argument("--task", choices=["regression", "classification"], default="regression")
+    parser.add_argument("--alpha", type=float, default=config.ALPHA)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--test_size", type=float, default=0.2)
+    parser.add_argument("--jobs", type=int, default=config.N_JOBS)
+    parser.add_argument("--out", default="model_scout_results.json")
 
-    models = [m.strip() for m in args.models.split(",") if m.strip()]
-    encodings = [e.strip() for e in args.encodings.split(",") if e.strip()]
-    sample_grid = [int(x) for x in args.samples.split(",") if x.strip()]
+    args = parser.parse_args()
 
     run_scout(
-        seq_file=args.sequences,
-        labels_file=args.labels,
-        models=models,
-        encodings=encodings,
-        sample_grid=sample_grid,
+        sequences=args.sequences,
+        labels=args.labels,
+        models=args.models,
+        encodings=args.encodings,
+        sample_sizes=args.samples,
+        task=args.task,
         alpha=args.alpha,
         seed=args.seed,
         test_size=args.test_size,
-        stratify=args.stratify,
-        outpath=args.out,
         n_jobs=args.jobs,
+        outpath=args.out,
     )
+
+
+if __name__ == "__main__":
+    cli_entry()
