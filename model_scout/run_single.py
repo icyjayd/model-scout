@@ -28,7 +28,7 @@ def _spearman(y_true, y_pred, context=None):
     if np.isnan(p): p = 1.0
     return float(rho), float(p)
 
-def run_single(model_name, encoding, n_samples, df, task, seed, test_size, stratify):
+def run_single(model_name, encoding, n_samples, df, task, seed, test_size, stratify, model_config_path=None):
     """Train and evaluate one model/encoding/sample-size combination."""
     try:
         df_sub = df.sample(n=min(n_samples, len(df)), random_state=seed)
@@ -42,7 +42,7 @@ def run_single(model_name, encoding, n_samples, df, task, seed, test_size, strat
             X, y, test_size=test_size, random_state=seed, stratify=strat_y
         )
 
-        model = build_model(task, model_name)
+        model = build_model(task, model_name, model_config_path=model_config_path, seed=seed)
         t0 = time.time()
         model.fit(Xtr, ytr)
         ypred = model.predict(Xte)

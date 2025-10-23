@@ -1,2 +1,0 @@
-[console_scripts]
-model-scout = model_scout.main:cli_entry

@@ -1,13 +1,39 @@
 import os
+from datetime import datetime
+
 
 def make_html_report(outdir, plots, meta, ranked_df, df_results):
+    """
+    Generate an HTML report summarizing Model Scout results.
+    Now dynamically labels ranking metric (accuracy or Spearman ρ)
+    and includes generation timestamp.
+    """
+
     report_dir = os.path.join(outdir, "reports")
     os.makedirs(report_dir, exist_ok=True)
     report_path = os.path.join(report_dir, "summary.html")
 
-    def rel(p): return os.path.relpath(p, report_dir).replace("\\", "/")
+    def rel(p):  # relative path helper for embedded links
+        return os.path.relpath(p, report_dir).replace("\\", "/")
 
+    # Detect ranking metric type from ranked_df
+    if "metric_type" in ranked_df.columns and not ranked_df.empty:
+        metric_label = (
+            "accuracy"
+            if ranked_df["metric_type"].iloc[0] == "accuracy"
+            else "Spearman ρ"
+        )
+    else:
+        # Fallback for backward compatibility
+        metric_label = "Spearman ρ"
+
+    # Top table of ranked results
     top_html = ranked_df.head(20).to_html(index=False, float_format=lambda x: f"{x:.4f}")
+
+    # Format metadata
+    models = ", ".join(meta.get("models", [])) if isinstance(meta.get("models"), list) else meta.get("models", "")
+    encodings = ", ".join(meta.get("encodings", [])) if isinstance(meta.get("encodings"), list) else meta.get("encodings", "")
+    sample_grid = ", ".join(map(str, meta.get("sample_grid", []))) if isinstance(meta.get("sample_grid"), (list, tuple)) else meta.get("sample_grid", "")
 
     html = f"""<!doctype html>
 <html><head><meta charset="utf-8" />
@@ -24,13 +50,13 @@ th{{background:#f7f7f7;}}
 .small{{color:#666;font-size:0.9rem;}}
 </style></head><body>
 <h1>Model Scout Report</h1>
-<p><b>Task:</b> {meta['task']} | <b>α:</b> {meta['alpha']} | <b>Jobs:</b> {meta['n_jobs']}</p>
-<p><b>Models:</b> {', '.join(meta['models'])}<br>
-<b>Encodings:</b> {', '.join(meta['encodings'])}<br>
-<b>Sample grid:</b> {', '.join(map(str, meta['sample_grid']))}<br>
+<p><b>Task:</b> {meta.get('task','?')} | <b>α:</b> {meta.get('alpha','?')} | <b>Jobs:</b> {meta.get('n_jobs','?')}</p>
+<p><b>Models:</b> {models}<br>
+<b>Encodings:</b> {encodings}<br>
+<b>Sample grid:</b> {sample_grid}<br>
 <b>Total runs:</b> {len(df_results)}</p>
 
-<h2>Top Configurations (Spearman ρ)</h2>
+<h2>Top Configurations (ranked by {metric_label})</h2>
 {top_html}
 
 <h2>Plots</h2>
@@ -40,8 +66,10 @@ th{{background:#f7f7f7;}}
   <div class="card"><b>Runtime per Model</b><a href="{rel(plots['runtime'])}" target="_blank"><img class="thumb" src="{rel(plots['runtime'])}"/></a></div>
 </div>
 
-<p class="small">Report generated in {outdir}</p>
+<p class="small">Report generated on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} in {outdir}</p>
 </body></html>"""
+
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(html)
+
     return report_path

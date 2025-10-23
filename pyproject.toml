@@ -34,3 +34,6 @@ model-scout = "model_scout.main:cli_entry"
 [project.urls]
 Homepage = "https://github.com/icyjayd/model-scout"
 Issues = "https://github.com/icyjayd/model-scout/issues"
+
+[tool.setuptools]
+packages = ["model_scout"]

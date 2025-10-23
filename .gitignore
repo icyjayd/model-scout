@@ -1,1 +1,6 @@
 model_scout/__pycache__/
+.pytest_cache/
+runs/
+model_scout.egg-info/
+model_scout/tests/__pycache__/
+model_scout/utils/__pycache__/
