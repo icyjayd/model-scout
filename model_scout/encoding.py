@@ -177,7 +177,6 @@ def encode_sequences(
         cached = _maybe_load_cache(encoding, key, n_request, base=cache_base)
         if cached is not None:
             return cached
-
     # Compute new encodings
     if encoding == "aac":
         arr = encode_aac(sequences)
